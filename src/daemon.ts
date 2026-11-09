@@ -108,6 +108,8 @@ import {
   stopCliRuntimeUpdateMonitor,
 } from './core/cli-runtime-update.js';
 import { sendRestartReportIfPending } from './core/restart-report.js';
+import { buildPendingRestartNoticeCard, type PendingRestartNoticeInput } from './core/pending-restart-notice.js';
+import { runningBinaryWatch, readBinaryReplacedNoticeKey, writeBinaryReplacedNoticeKey } from './core/running-binary.js';
 import { botmuxVersion } from './utils/install-info.js';
 import { SESSION_STORE_PROTOCOL } from './utils/daemon-version-display.js';
 import { readSupervisorProcessStartIdentity } from './core/process-start-identity.js';
@@ -32604,6 +32606,27 @@ function claimOverloadEpisode(kind: 'entered' | 'recovered'): boolean {
  *
  *  同理平台托管时**不返回 `localUrl`**：那一条恒定带 token，是给终端里的 owner 当
  *  平台异常兜底用的（`botmux dashboard` 有显式参数可取），不该主动推进聊天记录。 */
+/**
+ * DM the owner that a newer botmux is on disk than this daemon is running, so
+ * `botmux restart` is due. Sent by the maintenance tick (auto-update with
+ * auto-restart off) and by the worker pool when a worker already died of it;
+ * callers own de-duplication.
+ */
+async function sendPendingRestartNotice(larkAppId: string, input: PendingRestartNoticeInput): Promise<void> {
+  const owner = resolvePrimaryOwnerOpenId(larkAppId);
+  if (!owner) {
+    logger.warn(`[pending-restart] notice skipped (${input.reason}): no primary owner configured for ${larkAppId}`);
+    return;
+  }
+  const dash = dashboardUrlForReport();
+  const card = buildPendingRestartNoticeCard(
+    { ...input, dashboardUrl: dash.url, dashboardLocalUrl: dash.localUrl },
+    localeForBot(larkAppId),
+  );
+  await sendUserMessage(larkAppId, owner, card, 'interactive');
+  logger.info(`[pending-restart] owner notified (${input.reason}${input.newVersion ? `, ${input.newVersion}` : ''})`);
+}
+
 function dashboardUrlForReport(): { url?: string; localUrl?: string } {
   try {
     const dir = join(homedir(), '.botmux');
@@ -32657,6 +32680,10 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Inert until an enabled turn is admitted: construction performs no URL
   // scan and does not open, create, query, or prune the LinkRef ledger.
   initializeLinkRefRuntime(config.session.dataDir);
+
+  // Remember which executable this daemon runs, before any update could land:
+  // workers re-exec that path, and a replaced file is diagnosed against this.
+  runningBinaryWatch.capture();
 
   // Survive a fire-and-forget rejection instead of dying from it. Installed here
   // rather than in index-daemon.ts on purpose: startDaemon has TWO entry points
@@ -33323,6 +33350,16 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       void publishWorkingDirRecovery(ds, path, { sessionReply, lastRepoScan }, ctx).catch(err => {
         logger.warn(`[${tag(ds)}] working-dir recovery notice failed: ${err instanceof Error ? err.message : String(err)}`);
       });
+    },
+    onStartupFailureWithReplacedBinary(ds) {
+      // One DM per replaced binary across every bot's daemon: the marker is
+      // keyed by the on-disk identity, so the next bot to hit the same stale
+      // daemon stays quiet while a later update notifies again.
+      const key = runningBinaryWatch.currentKey();
+      if (readBinaryReplacedNoticeKey(config.session.dataDir) === key) return;
+      writeBinaryReplacedNoticeKey(config.session.dataDir, key);
+      void sendPendingRestartNotice(cfg.larkAppId, { reason: 'binary-replaced' })
+        .catch(err => logger.warn(`[${tag(ds)}] replaced-binary notice failed: ${err instanceof Error ? err.message : String(err)}`));
     },
     getActiveCount,
     prepareRawInputTurn: (ds, turnId) => prepareTurnCliIdentity(ds, turnId),
@@ -35881,7 +35918,12 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // global botmux install and a detached `botmux restart` would tear down the
   // real fleet. Core-only manages only its own single process.
   if (idx === 0 && !coreOnly) {
-    startMaintenance();
+    startMaintenance({
+      notifyPendingRestart: ({ oldVersion, newVersion }) => {
+        void sendPendingRestartNotice(cfg.larkAppId, { reason: 'auto-update', oldVersion, newVersion })
+          .catch(err => logger.warn(`[pending-restart] auto-update notice failed: ${err instanceof Error ? err.message : String(err)}`));
+      },
+    });
     startCliRuntimeUpdateMonitor({
       dataDir: config.session.dataDir,
       primaryLarkAppId: cfg.larkAppId,

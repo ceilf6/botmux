@@ -75,6 +75,7 @@ import {
 import { persistStreamCardState, rememberLastCliInput } from './session-manager.js';
 import { MissingWorkingDirError } from './working-dir-recovery.js';
 import { spawnWorker, isStandaloneBinary, preloadImportSpecifier, WORKER_ENTRY_SUBCOMMAND } from './self-spawn.js';
+import { runningBinaryWatch } from './running-binary.js';
 import {
   resolveSessionLaunchModel,
   resolveSessionLaunchModelChoice,
@@ -1243,6 +1244,11 @@ export interface WorkerPoolCallbacks {
    *  gone; tell the chat and offer recovery. Fired just before the
    *  {@link MissingWorkingDirError} is thrown, so callers need not reply. */
   onMissingWorkingDir?: (ds: DaemonSession, path: string, ctx: { turnId?: string }) => void;
+  /** A worker exited before ready while this daemon's own executable had been
+   *  replaced on disk since startup (an installed-but-unapplied update). The
+   *  chat already got the explanation; this is the host's chance to DM the owner
+   *  that `botmux restart` is due. */
+  onStartupFailureWithReplacedBinary?: (ds: DaemonSession) => void;
   getActiveCount: () => number;
   /** Prepare trigger-user CLI identity before a delayed raw-input turn. */
   prepareRawInputTurn?: (ds: DaemonSession, turnId: string) => void | Promise<void>;
@@ -1404,6 +1410,17 @@ export interface WorkerPoolCallbacks {
 }
 
 let callbacks: WorkerPoolCallbacks | undefined;
+
+/**
+ * A standalone daemon re-execs its own path for every worker (self-spawn.ts),
+ * so once an update has replaced that file the worker runs a newer version than
+ * the daemon and exits before ready with an opaque runtime error. Name the cause
+ * next to the spawn so the daemon log explains the exit that follows.
+ */
+function warnIfRunningBinaryReplaced(t: string): void {
+  if (!runningBinaryWatch.replaced()) return;
+  logger.warn(`[${t}] botmux executable on disk has changed since this daemon started (an installed update awaiting restart); the worker will run the new binary against this old daemon and will likely exit before ready — run \`botmux restart\``);
+}
 
 /**
  * Initialise worker-pool callbacks. Must be called once before forkWorker().
@@ -16583,6 +16600,7 @@ function forkWorkerPrepared(
 
   // Node: fork `dist/worker.js`. Standalone binary: re-exec THIS binary with the
   // hidden `__worker` subcommand over the same IPC channel (see self-spawn.ts).
+  warnIfRunningBinaryReplaced(t);
   worker = spawnWorker({
     distDir: join(__dirname, '..'),
     cwd,
@@ -22588,6 +22606,16 @@ function setupWorkerHandlers(
       if (stderrTail) {
         reason += `\n\n${tr('workerDiag.recentStderr', undefined, loc)}\n${stderrTail}`;
       }
+      // The runtime's own message for this case is opaque (`An unknown error
+      // occurred (Unexpected)`); the actionable cause is a replaced executable.
+      if (runningBinaryWatch.replaced()) {
+        reason += `\n\n${tr('worker.start_exited_binary_replaced', undefined, loc)}`;
+        try {
+          requireCallbacks().onStartupFailureWithReplacedBinary?.(ds);
+        } catch (err) {
+          logger.warn(`[${t}] Replaced-binary startup failure not reported to owner: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       // Carry the frozen init attribution so an abrupt pre-ready exit of a
       // durable VC delivery is fenced to the receipt/lease chain, not replied
       // out-of-band (which could post on a silent delivery).
@@ -24622,6 +24650,7 @@ export function forkAdoptWorker(
   );
   // Node: fork `dist/worker.js`. Standalone binary: re-exec THIS binary with the
   // hidden `__worker` subcommand over the same IPC channel (see self-spawn.ts).
+  warnIfRunningBinaryReplaced(t);
   const worker = spawnWorker({
     distDir: join(__dirname, '..'),
     cwd: adoptCwd,

@@ -62,6 +62,8 @@ interface Opts {
   localDev?: boolean;
   updateThrows?: boolean;
   latest?: string | null; // registry latest looked up before the tick (undefined ⇒ dep not provided)
+  /** Provide the pending-restart owner notice dep; 'throws' makes it fail. */
+  notify?: true | 'throws';
 }
 
 function makeDeps(cfg: MaintenanceConfig, opts: Opts = {}) {
@@ -74,6 +76,7 @@ function makeDeps(cfg: MaintenanceConfig, opts: Opts = {}) {
     outsideLock: [] as string[],
     intents: [] as RestartIntent[],
     logs: [] as string[],
+    notices: [] as Array<{ oldVersion: string; newVersion: string }>,
   };
   let ver = opts.startVer ?? '2.64.0';
   const installTo = opts.installTo ?? '2.65.0';
@@ -107,6 +110,12 @@ function makeDeps(cfg: MaintenanceConfig, opts: Opts = {}) {
     },
     log: (m) => { calls.logs.push(m); },
     ...(opts.latest !== undefined ? { latestVersion: () => opts.latest ?? null } : {}),
+    ...(opts.notify ? {
+      notifyPendingRestart: (info: { oldVersion: string; newVersion: string }) => {
+        calls.notices.push(info);
+        if (opts.notify === 'throws') throw new Error('lark down');
+      },
+    } : {}),
   };
   return { deps, calls, state };
 }
@@ -145,6 +154,74 @@ describe('runMaintenanceTick', () => {
     expect(calls.restart).toBe(0);
     expect(calls.intents).toEqual([]);
     expect(state.autoUpdate?.lastDate).toBe(TODAY);
+  });
+
+  describe('pending-restart owner notice (auto-restart OFF)', () => {
+    const cfgOff: MaintenanceConfig = { autoUpdate: { enabled: true, time: '12:00' } };
+
+    it('a newer version landed → notifies once with the version delta and remembers it', () => {
+      const { deps, calls, state } = makeDeps(cfgOff, { notify: true });
+      runMaintenanceTick(deps);
+      expect(calls.restart).toBe(0);
+      expect(calls.notices).toEqual([{ oldVersion: '2.64.0', newVersion: '2.65.0' }]);
+      expect(state.pendingRestartNotice).toEqual({ version: '2.65.0' });
+      expect(calls.writes).toBeGreaterThanOrEqual(2); // date mark + notice watermark
+    });
+
+    it('the same version re-installed the next day (daemon still old) → stays quiet', () => {
+      const { deps, calls, state } = makeDeps(cfgOff, {
+        notify: true,
+        init: { pendingRestartNotice: { version: '2.65.0' } },
+      });
+      runMaintenanceTick(deps);
+      expect(calls.update).toBe(1);
+      expect(calls.notices).toEqual([]);
+      expect(state.pendingRestartNotice).toEqual({ version: '2.65.0' });
+    });
+
+    it('a yet newer version after an earlier notice → notifies again for the new one', () => {
+      const { deps, calls } = makeDeps(cfgOff, {
+        notify: true,
+        installTo: '2.66.0',
+        init: { pendingRestartNotice: { version: '2.65.0' } },
+      });
+      runMaintenanceTick(deps);
+      expect(calls.notices).toEqual([{ oldVersion: '2.64.0', newVersion: '2.66.0' }]);
+    });
+
+    it('auto-restart ON → no notice (the restart itself reports)', () => {
+      const { deps, calls, state } = makeDeps(
+        { autoUpdate: { enabled: true, time: '12:00' }, autoRestart: { enabled: true } },
+        { notify: true },
+      );
+      runMaintenanceTick(deps);
+      expect(calls.restart).toBe(1);
+      expect(calls.notices).toEqual([]);
+      expect(state.pendingRestartNotice).toBeUndefined();
+    });
+
+    it('nothing new installed → no notice', () => {
+      const { deps, calls } = makeDeps(cfgOff, { notify: true, installTo: '2.64.0' });
+      runMaintenanceTick(deps);
+      expect(calls.notices).toEqual([]);
+    });
+
+    it('a failing notice is logged, keeps its watermark and does not fail the tick', () => {
+      const { deps, calls, state } = makeDeps(cfgOff, { notify: 'throws' });
+      expect(() => runMaintenanceTick(deps)).not.toThrow();
+      expect(calls.notices).toHaveLength(1);
+      expect(state.pendingRestartNotice).toEqual({ version: '2.65.0' });
+      expect(calls.logs.some(l => l.includes('pending-restart notice failed'))).toBe(true);
+      expect(state.autoUpdate?.lastDate).toBe(TODAY);
+    });
+
+    it('without the dep the tick behaves exactly as before (no watermark written)', () => {
+      const { deps, calls, state } = makeDeps(cfgOff);
+      runMaintenanceTick(deps);
+      expect(calls.update).toBe(1);
+      expect(state.pendingRestartNotice).toBeUndefined();
+      expect(calls.writes).toBe(1);
+    });
   });
 
   it('due but already on the latest version → installs (no-op), no restart, marks', () => {

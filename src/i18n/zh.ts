@@ -1623,6 +1623,7 @@ export const messages: Record<string, string> = {
   'worker.input_retired_unconfirmed': '⚠️ 会话在处理这条消息期间被主动休眠或更换，Botmux 未能确认它是否已进入执行队列。请先查看会话记录确认结果；若未执行，再重新发送这条消息。\nturn: {turnId}',
   'worker.start_failed_log_fallback': 'daemon 日志',
   'worker.start_exited_early': 'worker 在就绪前退出（exit code: {code}）；详细错误可查看 Botmux 日志。',
+  'worker.start_exited_binary_replaced': '原因很可能是：botmux 在 daemon 启动后已被更新（通常是每日自动更新），但 daemon 尚未重启，新 worker 使用的是磁盘上的新版本、无法与仍在运行的旧版本 daemon 配合。请在宿主终端执行 `botmux restart`，之后重发消息即可；现有会话不受影响。',
   'workerDiag.recentStderr': '最近的 worker 输出（可能含死因）：',
   'worker.tui_submit_failed': '⚠️ TUI 答案未能确认送达 {cliName}。CLI 可能仍在等待输入；请打开本机终端处理，或发送一条新消息解除并继续。',
   'worker.raw_input_failed': '⚠️ Slash 命令未能确认送达 {cliName}，同一条消息中紧随其后的正文没有继续提交。请检查当前终端状态后重发。',
@@ -2443,6 +2444,14 @@ export const messages: Record<string, string> = {
   'restart.changelog_label': '更新内容：',
   'restart.changelog_link_fallback': '详情：{url}',
   'restart.card_title': 'botmux 维护通知',
+
+  // Pending-restart notice (bot DM to owner): a newer botmux is on disk but the
+  // running daemon has not been restarted onto it
+  'pending_restart.card_title': 'botmux 需要重启',
+  'pending_restart.auto_update': '⬆️ **botmux 已自动更新，但尚未重启生效**',
+  'pending_restart.binary_replaced': '⚠️ **botmux 已更新但 daemon 未重启，新会话启动失败**',
+  'pending_restart.consequence': '在重启之前，daemon 仍运行旧版本，而新开的会话会使用磁盘上的新版本，二者不兼容：新会话会在就绪前退出，现有会话不受影响。',
+  'pending_restart.action': '请在宿主终端执行 `botmux restart`（会自动恢复现有会话）；如需以后自动处理，可在 Dashboard 全局设置中开启「更新后自动重启」。',
 
   // Host-side CLI runtime update monitor
   'cli_update.card_title': '{cli} 有新版本',

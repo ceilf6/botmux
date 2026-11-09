@@ -1624,6 +1624,7 @@ export const messages: Record<string, string> = {
   'worker.input_retired_unconfirmed': '⚠️ The session was deliberately suspended or replaced while this message was in flight, and Botmux could not confirm whether it entered the execution queue. Check the session history first; resend the message only if it did not run.\nturn: {turnId}',
   'worker.start_failed_log_fallback': 'the daemon log',
   'worker.start_exited_early': 'The worker exited before becoming ready (exit code: {code}); see the Botmux logs for details.',
+  'worker.start_exited_binary_replaced': 'Likely cause: botmux was updated after this daemon started (usually by the daily auto-update) but the daemon has not been restarted, so the new worker runs the new binary on disk and cannot work with the old daemon still running. Run `botmux restart` on the host, then resend the message; existing sessions are unaffected.',
   'workerDiag.recentStderr': 'Recent worker output (may include the failure cause):',
   'worker.tui_submit_failed': '⚠️ The TUI answer could not be confirmed as delivered to {cliName}. The CLI may still be waiting for input; open the local terminal or send a new message to recover.',
   'worker.raw_input_failed': '⚠️ The slash command could not be confirmed as delivered to {cliName}, so the follow-up text in the same message was not submitted. Check the terminal state, then resend.',
@@ -2438,6 +2439,14 @@ export const messages: Record<string, string> = {
   'restart.changelog_label': 'What’s new:',
   'restart.changelog_link_fallback': 'Details: {url}',
   'restart.card_title': 'botmux maintenance notice',
+
+  // Pending-restart notice (bot DM to owner): a newer botmux is on disk but the
+  // running daemon has not been restarted onto it
+  'pending_restart.card_title': 'botmux needs a restart',
+  'pending_restart.auto_update': '⬆️ **botmux was auto-updated but has not been restarted yet**',
+  'pending_restart.binary_replaced': '⚠️ **botmux was updated but the daemon was not restarted; a new session failed to start**',
+  'pending_restart.consequence': 'Until the restart, the daemon keeps running the old version while new sessions use the new binary on disk. The two are incompatible: new sessions exit before becoming ready; existing sessions are unaffected.',
+  'pending_restart.action': 'Run `botmux restart` on the host (existing sessions are recovered automatically). To handle this automatically in future, enable "Auto-restart after update" in the Dashboard global settings.',
 
   // Host-side CLI runtime update monitor
   'cli_update.card_title': 'New {cli} version available',

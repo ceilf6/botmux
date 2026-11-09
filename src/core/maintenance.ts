@@ -73,6 +73,9 @@ export {
 export interface MaintenanceState {
   /** Local date the auto-update run was last handled (fired or skipped). */
   autoUpdate?: { lastDate: string };
+  /** The installed-but-not-yet-applied version the owner was last told about,
+   *  so a daily re-install of the same version does not DM again. */
+  pendingRestartNotice?: { version: string };
 }
 
 export interface MaintenanceDeps {
@@ -128,6 +131,15 @@ export interface MaintenanceDeps {
   writeIntent: (intent: RestartIntent) => void;
   /** Spawn a detached `botmux restart` (this process is then killed by pm2). */
   triggerRestart: () => void;
+  /**
+   * A newer version is on disk and auto-restart is off, so nothing will apply
+   * it. Tell the owner: for the compiled binary this is not a benign "later"
+   * state — the daemon keeps its old image while every worker forked from now on
+   * runs the new file, and such workers exit before ready. Called at most once per
+   * installed version (see MaintenanceState.pendingRestartNotice); a throw is
+   * logged and does not fail the tick.
+   */
+  notifyPendingRestart?: (info: { oldVersion: string; newVersion: string }) => void;
   log?: (msg: string) => void;
 }
 
@@ -217,6 +229,18 @@ export function runMaintenanceTick(deps: MaintenanceDeps): void {
   // A newer version was installed.
   if (!cfg.autoRestart?.enabled) {
     log(`auto-update: installed ${after} (was ${before}); auto-restart off — applies on next restart`);
+    if (deps.notifyPendingRestart && state.pendingRestartNotice?.version !== after) {
+      // Mark before sending: a notice that throws after delivery must not repeat
+      // tomorrow, and a failed send is logged for the operator rather than retried
+      // into a daily DM loop.
+      state.pendingRestartNotice = { version: after };
+      deps.writeState(state);
+      try {
+        deps.notifyPendingRestart({ oldVersion: before, newVersion: after });
+      } catch (e) {
+        log(`auto-update: pending-restart notice failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
   } else if (!restartFailed) {
     log(`auto-update: ${before} → ${after}, restarting to apply`);
   }
@@ -659,7 +683,15 @@ export function runSelfReplaceBlocking(version = 'latest'): string {
   return m?.[1] ?? '';
 }
 
-function productionDeps(latestVersion: () => string | null = () => null): MaintenanceDeps {
+export interface MaintenanceWiring {
+  /** Owner notification for an installed-but-unapplied update (see MaintenanceDeps). */
+  notifyPendingRestart?: MaintenanceDeps['notifyPendingRestart'];
+}
+
+function productionDeps(
+  latestVersion: () => string | null = () => null,
+  wiring: MaintenanceWiring = {},
+): MaintenanceDeps {
   // Kept after a successful resolve so post-pnpm-update version/restart lookups
   // use the stable global node_modules/botmux symlink, not the removed
   // .pnpm/botmux@old runtime realpath.
@@ -720,6 +752,7 @@ function productionDeps(latestVersion: () => string | null = () => null): Mainte
         throw error;
       }
     },
+    ...(wiring.notifyPendingRestart ? { notifyPendingRestart: wiring.notifyPendingRestart } : {}),
     log: (msg) => logger.info(`[maintenance] ${msg}`),
   };
 }
@@ -727,10 +760,10 @@ function productionDeps(latestVersion: () => string | null = () => null): Mainte
 let timer: NodeJS.Timeout | undefined;
 
 /** Start the maintenance loop. Call only on the primary daemon (bot-0). */
-export function startMaintenance(): void {
+export function startMaintenance(wiring: MaintenanceWiring = {}): void {
   if (timer) return;
   let latest: string | null = null;
-  const deps = productionDeps(() => latest);
+  const deps = productionDeps(() => latest, wiring);
   const tick = async () => {
     try {
       // Only look the registry up on the tick that will actually run the update,
